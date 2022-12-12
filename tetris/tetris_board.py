@@ -105,7 +105,7 @@ def attack(lines, tspin, b2b, combo):
         r = np.log(combo * 1.26)
     return int(r)
 
-n = 3
+n = 1
 
 class Board():
     def _drop(moves, full):
@@ -151,7 +151,7 @@ class Board():
         rotated = np.zeros_like(moves)
 
         if board[:4].sum() > 0:
-            return moves, rotated
+            return moves[:, 4:], rotated[:, 4:]
 
         # padding of piece
         x = rots[piece][0].shape[0] // 2
@@ -159,14 +159,17 @@ class Board():
         full = np.array([correlate2d(board, rots[piece][i], fillvalue=1)[x:h+x,x:w+x] for i in range(4)], dtype=int)
         full = clip(full, 0, 1)
         moves[:, 3] = 1
+        moves[:, 3] -= full[:, 3]
+        moves = Board._drop(moves, full)
         for _ in range(n):
             moves, r = Board._rotate(moves, full, piece)
             rotated |= r
             moves = Board._drop(moves, full)
-        return moves, rotated
+        return moves[:, 4:], rotated[:, 4:]
 
     def apply_move(board, x, y, r, p):
         # add piece to board, clearing lines and returning number of cleared lines
+        x += 4
         board = board.copy()
         piece = rots[p][r]
 

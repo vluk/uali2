@@ -10,7 +10,7 @@ class ResNet(nn.Module):
     def __init__(self):
         # game params
         self.board_x, self.board_y = 28, 14
-        self.action_size = 8 * 14 * 6
+        self.action_size = 8 * 10 * 6
 
         super(ResNet, self).__init__()
         self.conv1 = nn.Conv2d(1, NUM_CHANNELS, 3, stride=1, padding=1)
@@ -54,7 +54,7 @@ class NNetWrapper():
     def __init__(self):
         self.nnet = ResNet()
         self.board_x, self.board_y = 28, 14
-        self.action_size = (8, 14, 6)
+        self.action_size = (8, 10, 6)
 
         self.nnet.cuda()
 
@@ -97,7 +97,7 @@ class NNetWrapper():
         self.nnet.eval()
         with torch.no_grad():
             pi, v = self.nnet(board)
-        pi = pi.view(1, 8, 14, 6)
+        pi = pi.view(1, 8, 10, 6)
 
         # print('PREDICTION TIME TAKEN : {0:03f}'.format(time.time()-start))
-        return torch.exp(pi).data.cpu().numpy()[0], v.data.cpu().numpy()[0]
+        return torch.exp(pi).data.cpu().numpy()[0], v.data.cpu().numpy()[0][0]
