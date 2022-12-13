@@ -38,7 +38,7 @@ class SelfPlay():
             reward_encountered += abs(r)
             steps += 1
         return steps, reward_encountered
-    
+
     def get_latest_game(self):
         return self.steps, self.reward, self.i
     
@@ -50,8 +50,6 @@ class SelfPlay():
 
             self.steps, self.reward, self.i = steps, reward, i
 
-            if i % 25 == 0:
-                self.nnet.load_state_dict(ray.get(replay_buffer.get_state_dict.remote()))
-                self.nnet.cuda()
-                self.nnet.eval()
+            self.nnet.load_state_dict(ray.get(replay_buffer.get_state_dict.remote()))
+            self.nnet.eval()
             i += 1

@@ -1,4 +1,5 @@
 import numpy as np
+import numpy.ma as ma
 from tetris.tetris_game import Game
 import torch
 import random
@@ -12,8 +13,9 @@ def softmax(x):
     r=np.exp(x - np.max(x))
     return r/r.sum()
 
-def top_k(A, k):
-    return [tuple(np.unravel_index(i, A.shape)) for i in np.argpartition(A.flatten(), -k)[-k:]]
+def top_k(A, k, mask):
+    A = ma.array(A, mask=mask)
+    return [tuple(np.unravel_index(i, A.shape)) for i in A.flatten().argsort(endwith=False)[-k:]]
 
 class MCTS():
     def __init__(self, state, player, nnet):
@@ -30,7 +32,6 @@ class MCTS():
             self.obs = Game.observation(state, player)
 
             self.logits, self.v = self.nnet.predict(self.obs)
-            self.logits[self.moves == 0] -= 50
             self.g = np.random.gumbel(size=self.moves.shape)
             self.N = np.zeros_like(self.moves)
             self.r = np.zeros_like(self.moves)
@@ -58,8 +59,7 @@ class MCTS():
         rounds = int(np.log2(m + 0.01))
 
         g = np.random.gumbel(size=self.logits.shape)
-        A = top_k(g + self.logits, m)
-        A = [a for a in A if self.moves[a]]
+        A = top_k(g + self.logits, m, (1 - self.moves))
 
         while len(A) > 1:
             N_a = (n // rounds) // len(A)
@@ -88,15 +88,14 @@ class MCTS():
 
         new_pi, _ = self._get_improved_estimates()
 
-        score = new_pi - self.N / (self.N.sum() + 1)
-        action = np.unravel_index(np.argmax(score * self.moves), score.shape)
+        score = ma.array(new_pi - self.N / (self.N.sum() + 1), mask=(1 - self.moves))
+        action = np.unravel_index(np.argmax(score), score.shape)
         return self.visit_action(action)
 
     def visit_action(self, action):
         # invalid move loses game
         # mostly here for safety, not designed to be hit
         if self.player != 2 and self.moves[action] == 0:
-            print("invalid action hit")
             self.N[action] += 1
             self.q_hat[action] = -1
             return -1

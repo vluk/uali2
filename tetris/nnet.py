@@ -2,7 +2,7 @@ import numpy as np
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
-import torch.optim as optim
+from torch.amp import autocast
 import time
 
 NUM_CHANNELS = 32
@@ -27,7 +27,8 @@ class NNet(nn.Module):
         self.fc3 = nn.Linear(4096, 2048)
         self.fc4 = nn.Linear(2048, self.action_size)
         self.fc5 = nn.Linear(2048, 1)
-    
+
+    @autocast("cuda")
     def forward(self, b1, b2, q1, q2, c1, c2):
         s1 = b1.view(-1, 1, 10, 6)
         t1 = torch.cat((q1.view(-1, 49), c1.view(-1, 60)), 1)
