@@ -30,11 +30,13 @@ class MCTS():
             self.obs = Game.observation(state, player)
 
             self.logits, self.v = self.nnet.predict(self.obs)
-            self.logits[self.moves == 0] = -50
+            self.logits[self.moves == 0] -= 50
             self.g = np.random.gumbel(size=self.moves.shape)
             self.N = np.zeros_like(self.moves)
+            self.r = np.zeros_like(self.moves)
             self.q_hat = np.zeros_like(self.moves, dtype=float)
 
+        self.r = {}
         self.child = {}
     
     def _get_improved_estimates(self):
@@ -57,25 +59,22 @@ class MCTS():
 
         g = np.random.gumbel(size=self.logits.shape)
         A = top_k(g + self.logits, m)
-        A_copy = top_k(g + self.logits, m)
+        A = [a for a in A if self.moves[a]]
 
-        while m > 1:
-            N_a = (n // rounds) // m
-            if m == 2:
+        while len(A) > 1:
+            N_a = (n // rounds) // len(A)
+            if len(A) == 2:
                 N_a += budget // 2
-            budget -= N_a * m
 
             for _ in range(N_a):
                 for action in A:
-                    if self.moves[action]:
-                        self.visit_action(action)
+                    self.visit_action(action)
+                    budget -= 1
 
             score = g + self.logits + self.q_hat * (c_visit + np.max(self.N))
-            discard = [i[1] for i in sorted([(score[a], a) for a in A])[:m//2]]
+            discard = [i[1] for i in sorted([(score[a], a) for a in A])[:len(A)//2]]
             for i in discard:
                 A.remove(i)
-
-            m //= 2
 
         pi_new, v_new = self._get_improved_estimates()
  
@@ -84,8 +83,8 @@ class MCTS():
     def visit(self):
         if self.is_env:
             return self.visit_action(0)
-        if Game.terminal(self.state, self.player):
-            return -1 
+        if Game.terminal(self.state):
+            return 0
 
         new_pi, _ = self._get_improved_estimates()
 
@@ -95,16 +94,19 @@ class MCTS():
 
     def visit_action(self, action):
         # invalid move loses game
+        # mostly here for safety, not designed to be hit
         if self.player != 2 and self.moves[action] == 0:
             print("invalid action hit")
             self.N[action] += 1
-            self.q_hat[action] -= 1
+            self.q_hat[action] = -1
             return -1
+
         if action in self.child:
             # zero sum game
-            q = discount * -self.child[action].visit()
+            q = -(discount * self.child[action].visit() + self.r[action])
         else:
             next_state, r = Game.transition(self.state, self.player, action)
+            self.r[action] = r
             self.child[action] = MCTS(next_state, (self.player + 1) % 3, self.nnet)
             q = -(discount * self.child[action].v + r)
         
@@ -116,5 +118,5 @@ class MCTS():
         else:
             q_sum = self.q_hat[action] * self.N[action] + q
             self.N[action] += 1
-            self.q_hat[action[0], action[1], action[2]] = q_sum / self.N[action]
+            self.q_hat[action] = q_sum / self.N[action]
             return q

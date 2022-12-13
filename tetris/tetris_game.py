@@ -31,7 +31,7 @@ class PlayerState():
         self.t = t 
 
         if not self.piece_queue:
-            self.piece_queue = PIECE_QUEUE[:4]
+            self.piece_queue = PIECE_QUEUE[:7]
         
         self.moves, self.rotates = self._generate_moves()
 
@@ -132,6 +132,34 @@ class PlayerState():
         )
 
     def get_rep(self):
+        b = self.board[4:,]
+        q = np.zeros((7, 7))
+        mapping = {
+            "i" : 0,
+            "o" : 1,
+            "s" : 2,
+            "z" : 3,
+            "l" : 4,
+            "j" : 5,
+            "t" : 6
+        }
+        for i, piece in enumerate(self.piece_queue):
+            q[i][mapping[piece]] = 1
+
+        c = np.zeros((3, 20))
+        c[0, :self.b2b] = 1
+        c[1, :self.combo] = 1
+
+        i = 0
+        for attack in self.incoming_queue:
+            if i >= c.shape[1]:
+                break
+            c[2, i: i + attack] = 1 
+            i += attack + 1
+
+        return (b, q, c)
+    
+    def get_pretty_rep(self):
         rep = np.zeros((14, 14), dtype=int)
         # b2b indicator
         b2b_col = 0
@@ -149,15 +177,10 @@ class PlayerState():
         rep[:, 3:9] = self.board
         # show queue
         queue_col = 11
-        for i, piece in enumerate(reversed(self.piece_queue)):
-            rep, _ = Board.apply_move(rep, i * 3 - 2, queue_col, 0, piece)
+        for i, piece in enumerate(reversed(self.piece_queue[:4])):
+            rep, _ = Board.apply_move(rep, i * 3 - 2, queue_col, 0, piece) 
+
         return rep
-    
-    def pretty_rep(self):
-        rep = self.get_rep()
- 
-        out = "\n".join(["".join(["██" if i else "  " for i in row]) for row in rep])
-        return out
 
 class Game():
     def new_game():
@@ -177,24 +200,18 @@ class Game():
         return game
     
     def _apply_environment_move(game):
-        try:
-            if game[0]["delay"] <= game[1]["delay"]:
-                state_0, lines, attack = game[0]["state"].apply_move(game[0]["move"])
-                state_1 = game[1]["state"].apply_incoming(attack, game[0]["delay"])
-                r = (lines + attack)/10
-            else:
-                state_1, lines, attack = game[1]["state"].apply_move(game[1]["move"])
-                state_0 = game[0]["state"].apply_incoming(attack, game[1]["delay"])
-                r = -(lines + attack)/10
-        except Exception as e:
-            # error in movegen?
-            print(Game.display(game))
-            print(game[0]["move"])
+        if game[0]["delay"] <= game[1]["delay"]:
             state_0, lines, attack = game[0]["state"].apply_move(game[0]["move"])
-            print(game[0]["state"].moves[game[0]["move"]])
-            print(game[1]["move"])
+            state_1 = game[1]["state"].apply_incoming(attack, game[0]["delay"])
+            r = (lines + attack)/10
+            if state_0.terminal():
+                r -= 1
+        else:
             state_1, lines, attack = game[1]["state"].apply_move(game[1]["move"])
-            print(game[1]["state"].moves[game[1]["move"]])
+            state_0 = game[0]["state"].apply_incoming(attack, game[1]["delay"])
+            r = -(lines + attack)/10
+            if state_1.terminal():
+                r += 1
 
         return [{"state": state_0, "delay": None, "move": None}, {"state": state_1, "delay": None, "move": None}], r
 
@@ -215,8 +232,8 @@ class Game():
             delay, move = MIN_DELAY - game[player]["state"].t, action
             return (Game._apply_player_move(game, player, delay, move), 0)
     
-    def terminal(game, player):
-        return player != 2 and game[player]["state"].terminal()
+    def terminal(game):
+        return game[0]["state"].terminal() or game[1]["state"].terminal()
 
     def moves(game, player):
         return game[player]["state"].moves
@@ -224,11 +241,11 @@ class Game():
     def observation(game, player):
         if player == 2:
             raise Exception("environment player has no input")
-        return np.concatenate([game[player]["state"].get_rep(),game[1 - player]["state"].get_rep()])
+        b1, q1, c1 = game[player]["state"].get_rep()
+        b2, q2, c2 = game[1 - player]["state"].get_rep()
+        return (b1, b2, q1, q2, c1, c2)
     
     def display(game):
-        rep = np.concatenate([game[0]["state"].get_rep(),game[1]["state"].get_rep()], axis=1)
+        rep = np.concatenate([game[0]["state"].get_pretty_rep(),game[1]["state"].get_pretty_rep()], axis=1)
         return "\n".join(["".join(["  " if i else "██" for i in row]) for row in rep])
 
-    def string_rep(rep):
-        return bytearray(np.packbits(rep)).decode()

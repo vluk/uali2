@@ -10,7 +10,14 @@ class ReplayBuffer():
     def __init__(self, window_size=10000, batch_size=16):
         self.window_size = window_size
         self.batch_size = batch_size
-        self.obs_buffer = np.zeros((window_size, 28, 14))
+        self.obs_buffer = [
+            np.zeros((window_size, 10, 6)),
+            np.zeros((window_size, 10, 6)),
+            np.zeros((window_size, 7, 7)),
+            np.zeros((window_size, 7, 7)),
+            np.zeros((window_size, 3, 20)),
+            np.zeros((window_size, 3, 20))
+        ]
         self.pi_buffer = np.zeros((window_size, 8 * 10 * 6))
         self.v_buffer = np.zeros((window_size, 1))
         self.i = 0
@@ -18,7 +25,8 @@ class ReplayBuffer():
     
     def save_experience(self, experience):
         obs, pi, v = experience
-        self.obs_buffer[self.i] = obs
+        for j in range(6):
+            self.obs_buffer[j][self.i] = obs[j]
         self.pi_buffer[self.i] = pi.flatten()
         self.v_buffer[self.i] = v
         self.i += 1
@@ -28,14 +36,15 @@ class ReplayBuffer():
 
     def get_batch(self): 
         indices = np.random.choice(np.arange(self.window_size if self.full else self.i), self.batch_size)
-        return self.obs_buffer[indices], self.pi_buffer[indices], self.v_buffer[indices]
+        obs = (self.obs_buffer[j][indices] for j in range(6))
+        return obs, self.pi_buffer[indices], self.v_buffer[indices]
 
-def run_selfplay(nnet, replay_buffer, n=32, m=4, display = False):
+def run_selfplay(nnet, replay_buffer, n=200, m=16, display = False):
     state = Game.new_game()
     player = 0
     steps = 0
     reward_encountered = 0 
-    while not Game.terminal(state, player):
+    while not Game.terminal(state):
         if player == 0 and display:
             print(Game.display(state))
 
@@ -64,13 +73,13 @@ def main(iterations, games):
         for j in range(games):
             steps, reward_encountered = run_selfplay(nnet, replay_buffer)
             print(f"Game {j}: {steps} steps, {reward_encountered} total reward")
-        nnet.train(replay_buffer)
-        if i % 10 == 0:
-            fname = f"checkpoints/{i:04}_checkpoint.pth"
-            print(f"Saving checkpoint at {fname}...")
-            torch.save(nnet.nnet, fname)
-            run_selfplay(nnet, replay_buffer, n=200, m=16, display=True)
+#         nnet.train(replay_buffer)
+#         if i % 10 == 0:
+#             fname = f"checkpoints/{i:04}_checkpoint.pth"
+#             print(f"Saving checkpoint at {fname}...")
+#             torch.save(nnet.nnet, fname)
+#             run_selfplay(nnet, replay_buffer, n=200, m=16, display=True)
 
 
 if __name__ == "__main__":
-    main(500, 25)
+    cProfile.run("main(1, 1)")
