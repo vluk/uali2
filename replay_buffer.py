@@ -11,8 +11,8 @@ class ReplayBuffer():
             np.zeros((window_size, 10, 6)),
             np.zeros((window_size, 7, 7)),
             np.zeros((window_size, 7, 7)),
-            np.zeros((window_size, 3, 20)),
-            np.zeros((window_size, 3, 20))
+            np.zeros((window_size, 4)),
+            np.zeros((window_size, 4))
         ]
         self.pi_buffer = np.zeros((window_size, 8 * 10 * 6))
         self.v_buffer = np.zeros((window_size, 1))

@@ -1,12 +1,13 @@
 import numpy as np
 import numpy.ma as ma
-from tetris.tetris_game import Game
+from tetris.tetris_game import Game, MIN_DELAY, MAX_DELAY
 import torch
 import random
 
 c_visit = 50
 c_scale = 1
 discount = 0.97
+epsilon = 0.1
 
 # i can't believe numpy doesn't have softmax
 def softmax(x):
@@ -14,6 +15,9 @@ def softmax(x):
     return r/r.sum()
 
 def top_k(A, k, mask):
+    """
+    get top k elements of A
+    """
     A = ma.array(A, mask=mask)
     return [tuple(np.unravel_index(i, A.shape)) for i in A.flatten().argsort(endwith=False)[-k:]]
 
@@ -26,21 +30,27 @@ class MCTS():
         self.is_env = self.player == 2
 
         if self.is_env:
-            _, self.v = self.nnet.predict(Game.observation(self.state, 0))
+            next_state, self.r = Game.transition(self.state, self.player, 0, 0)
+            self.child = MCTS(next_state, 0, self.nnet)
+            self.v = self.child.v
+            self.delay = 0
         else:
             self.moves = Game.moves(self.state, self.player)
             self.obs = Game.observation(state, player)
 
-            self.logits, self.v = self.nnet.predict(self.obs)
+            self.logits, self.v, self.delay = self.nnet.predict(self.obs)
+            if random.random() < epsilon:
+                delay = random.random() * (MAX_DELAY - MIN_DELAY) + MIN_DELAY
             self.g = np.random.gumbel(size=self.moves.shape)
             self.N = np.zeros_like(self.moves)
             self.r = np.zeros_like(self.moves)
             self.q_hat = np.zeros_like(self.moves, dtype=float)
-
-        self.r = {}
-        self.child = {}
+            self.child = {}
     
     def _get_improved_estimates(self):
+        """
+        compute the improved policy and estimated q-value of current network using current policy, N, and q_hat
+        """
         masked_pi = softmax(self.logits) * (self.N != 0)
 
         visits = np.sum(self.N)
@@ -55,6 +65,9 @@ class MCTS():
         return new_pi, v_mix
 
     def select_action(self, n, m):
+        """
+        select action for current state using sequential halving + gumbel exploration
+        """
         budget = n
         rounds = int(np.log2(m + 0.01))
 
@@ -62,7 +75,9 @@ class MCTS():
         A = top_k(g + self.logits, m, (1 - self.moves))
 
         while len(A) > 1:
+            # divide budget evenly over rounds
             N_a = (n // rounds) // len(A)
+            # assign to final round if remainder
             if len(A) == 2:
                 N_a += budget // 2
 
@@ -71,18 +86,24 @@ class MCTS():
                     self.visit_action(action)
                     budget -= 1
 
+            # equation (11)
             score = g + self.logits + self.q_hat * (c_visit + np.max(self.N))
+            # discard lower half of scores
             discard = [i[1] for i in sorted([(score[a], a) for a in A])[:len(A)//2]]
             for i in discard:
                 A.remove(i)
 
         pi_new, v_new = self._get_improved_estimates()
  
-        return self.obs, pi_new, v_new, A[0]
+        return self.obs, pi_new, v_new, A[0], self.delay
 
     def visit(self):
+        """
+        non-root exploration policy
+        """
         if self.is_env:
-            return self.visit_action(0)
+            return (discount * self.child.visit() + self.r)
+
         if Game.terminal(self.state):
             return 0
 
@@ -93,29 +114,27 @@ class MCTS():
         return self.visit_action(action)
 
     def visit_action(self, action):
-        # invalid move loses game
-        # mostly here for safety, not designed to be hit
-        if self.player != 2 and self.moves[action] == 0:
+        """
+        visit a new action and update N and q_hat, creating a leaf node if necessary
+        """
+        assert self.player != 2
+
+        if self.moves[action] == 0:
             self.N[action] += 1
             self.q_hat[action] = -1
             return -1
 
+        # discount is applied every environment move, so not necessary here
         if action in self.child:
             # zero sum game
-            q = -(discount * self.child[action].visit() + self.r[action])
+            q = -self.child[action].visit()
         else:
-            next_state, r = Game.transition(self.state, self.player, action)
+            next_state, r = Game.transition(self.state, self.player, action, self.delay)
             self.r[action] = r
             self.child[action] = MCTS(next_state, (self.player + 1) % 3, self.nnet)
-            q = -(discount * self.child[action].v + r)
-        
-        if self.is_env:
-            # perspective of environment node is player 0
-            # not really sure this is the best way to express it
-            # the minus sign in the prior step should really be assigned to the next_value
-            return -q
-        else:
-            q_sum = self.q_hat[action] * self.N[action] + q
-            self.N[action] += 1
-            self.q_hat[action] = q_sum / self.N[action]
-            return q
+            q = -self.child[action].v
+
+        q_sum = self.q_hat[action] * self.N[action] + q
+        self.N[action] += 1
+        self.q_hat[action] = q_sum / self.N[action]
+        return q

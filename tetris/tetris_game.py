@@ -146,16 +146,7 @@ class PlayerState():
         for i, piece in enumerate(self.piece_queue):
             q[i][mapping[piece]] = 1
 
-        c = np.zeros((3, 20))
-        c[0, :self.b2b] = 1
-        c[1, :self.combo] = 1
-
-        i = 0
-        for attack in self.incoming_queue:
-            if i >= c.shape[1]:
-                break
-            c[2, i: i + attack] = 1 
-            i += attack + 1
+        c = np.array([self.b2b, self.combo, sum(self.incoming_queue), self.t])
 
         return (b, q, c)
     
@@ -215,22 +206,25 @@ class Game():
 
         return [{"state": state_0, "delay": None, "move": None}, {"state": state_1, "delay": None, "move": None}], r
 
-    def _apply_player_move(game, player, delay, move):
+    def _apply_player_move(game, player, move, delay):
         new_game = [game[0].copy(), game[1].copy()]
-        new_game[player]["delay"] = delay
+        t = new_game[player]["state"].t
+        new_game[player]["delay"] = max(MIN_DELAY, min(delay + t, MAX_DELAY)) - t
         new_game[player]["move"] = move
-        if not (MIN_DELAY <= new_game[player]["state"].t + new_game[player]["delay"] <= MAX_DELAY):
-            raise Exception("delay violated")
+
         return new_game
     
-    def transition(game, player, action):
+    def transition(game, player, move, delay):
         # returns s_t+1, r(s, a)
         if player == 2:
             new_state, reward = Game._apply_environment_move(game)
             return (new_state, reward)
         else:
-            delay, move = MIN_DELAY - game[player]["state"].t, action
-            return (Game._apply_player_move(game, player, delay, move), 0)
+            return (Game._apply_player_move(game, player, move, delay), 0)
+
+    def view(game, player):
+        # returns a copy of the current state from the perspective of player
+        return [{"state": game[player]["state"], "delay": None, "move": None}, {"state": game[1-player]["state"], "delay": None, "move": None}]
     
     def terminal(game):
         return game[0]["state"].terminal() or game[1]["state"].terminal()
