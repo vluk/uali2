@@ -65,8 +65,8 @@ kicks = {i: [(max(x, 0), max(y, 0), max(-x, 0), max(-y, 0)) for y,x in kicks[i]]
 o_kicks = {i: [(max(x, 0), max(y, 0), max(-x, 0), max(-y, 0)) for y,x in o_kicks[i]] for i in o_kicks}
 i_kicks = {i: [(max(x, 0), max(y, 0), max(-x, 0), max(-y, 0)) for y,x in i_kicks[i]] for i in i_kicks}
 
-TRIL = np.tril(np.ones((14, 14), dtype=int), k=0)
-POW = np.power(2, np.arange(14))
+TRIL = np.tril(np.ones((24, 24), dtype=int), k=0)
+POW = np.power(2, np.arange(24))
 
 
 minos = ["z", "l", "o", "s", "i", "j", "t"]
@@ -84,30 +84,8 @@ pieces = {
 rots = {mino: [np.rot90(pieces[mino], i, axes=(1, 0))
                for i in range(4)] for mino in minos}
 
-def attack(lines, tspin, b2b, combo):
-    """calculates attack, not counting all-clear bonus"""
-    base = 0
-    if tspin:
-        base = lines * 2
-    elif lines == 4:
-        base = 4
-    else:
-        base = lines - 1
-
-    r = base
-
-    if b2b:
-        r += int(np.log(b2b)) + 1
-
-    if combo:
-        r *= 1 + 0.25 * combo
-    if base == 0 and combo > 2:
-        r = np.log(combo * 1.26)
-    return int(r)
-
-n = 1
-
 class Board():
+    @staticmethod
     def _drop(moves, full):
         """simulate soft drop"""
         moves -= full
@@ -116,10 +94,11 @@ class Board():
         moves = moves * POW[:, np.newaxis]
         moves = TRIL @ moves
         moves = clip(moves, 0, 1)
-        moves[:,:13] -= moves[:,1:]
+        moves[:,:23] -= moves[:,1:]
         moves = clip(moves, 0, 1)
         return moves
 
+    @staticmethod
     def _rotate(moves, full, piece):
         h = moves.shape[1]
         w = moves.shape[2]
@@ -139,7 +118,8 @@ class Board():
         moves = clip(moves, 0, 1)
         return moves, rotated
 
-    def generate_moves(board, piece): 
+    @staticmethod
+    def generate_moves(board, piece):
         # implementation of srs+
         # at most 3 rotates
         # doesn't calculate tucks
@@ -148,10 +128,9 @@ class Board():
         h = board.shape[0]
         w = board.shape[1]
         moves = np.zeros((4, h, w), dtype=int)
-        rotated = np.zeros_like(moves)
 
         if board[:4].sum() > 0:
-            return moves[:, 4:], rotated[:, 4:]
+            return moves[:, 4:]
 
         # padding of piece
         x = rots[piece][0].shape[0] // 2
@@ -161,14 +140,15 @@ class Board():
         moves[:, 3] = 1
         moves[:, 3] -= full[:, 3]
         moves = Board._drop(moves, full)
-        for _ in range(n):
+        for _ in range(3):
             moves, r = Board._rotate(moves, full, piece)
-            rotated |= r
             moves = Board._drop(moves, full)
-        return moves[:, 4:], rotated[:, 4:]
+        return moves[:, 4:]
 
+    @staticmethod
     def apply_move(board, x, y, r, p):
         # add piece to board, clearing lines and returning number of cleared lines
+        # also returns list of cleared lines
         x += 4
         board = board.copy()
         piece = rots[p][r]
@@ -180,20 +160,23 @@ class Board():
                 if piece[i][j]:
                     board[x + i - pad, y + j - pad] = 1
 
-        unfilled = np.sum(board, axis=1) != board.shape[1]
-        lines = board.shape[0] - unfilled.sum()
-        board = np.concatenate([np.zeros((lines, board.shape[1]), dtype=int), board[unfilled]])
+        cleared = np.sum(board, axis=1) == board.shape[1]
+        board = np.concatenate([np.zeros((cleared.sum(), board.shape[1]), dtype=int), board[~cleared]])
 
-        return board, lines 
+        return board, cleared
 
-    def apply_attack(board, attack, column):
+    @staticmethod
+    def apply_garbage(board, garbage):
         # pushes board up with garbage in attack column
         # clips beyond line 24
+        board = board.copy()
         h = board.shape[0]
-        board[:h - attack] = board[attack:]
-        board[h - attack:h] = 1
-        board[h - attack:h, column] = 0
+        for column in garbage:
+            board[:h - 1] = board[1:]
+            board[h - 1:h] = 1
+            board[h - 1:h, column] = 0
         return board
     
-    def new(h = 14, w = 6):
+    @staticmethod
+    def new(h = 24, w = 10):
         return np.zeros((h, w), dtype=int)

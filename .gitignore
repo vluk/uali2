@@ -1,0 +1,4 @@
+checkpoints/
+env/
+__pycache__/
+tetris/__pycache__/

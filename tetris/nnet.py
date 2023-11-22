@@ -1,80 +1,102 @@
-import numpy as np
 import torch
 import torch.nn as nn
-import torch.nn.functional as F
-from torch.amp import autocast
-import time
 
-NUM_CHANNELS = 32
+NUM_CHANNELS = 16
+BOARD_SIZE = 20 * 10
+
+class CNBlock(nn.Module):
+    """Implementation of ConvNext block"""
+    def __init__(self, dim, stride=1):
+        super().__init__()
+        self.dwconv = nn.Conv2d(dim, dim, 5, padding=2, stride=stride, groups=dim)
+        self.norm = nn.LayerNorm(dim)
+        self.pwconv1 = nn.Linear(dim, 4*dim)
+        self.act = nn.GELU()
+        self.pwconv2 = nn.Linear(4*dim, dim)
+
+    def forward(self, x):
+        out = self.dwconv(x)
+        out = torch.permute(out, (0, 2, 3, 1))
+        out = self.norm(out)
+        out = self.pwconv1(out)
+        out = self.act(out)
+        out = self.pwconv2(out)
+        out = torch.permute(out, (0, 3, 1, 2))
+        out = out + x
+        return out
+
+class Representation(nn.Module):
+    def __init__(self, input_dims, dim, blocks):
+        super().__init__()
+        self.layers = nn.Sequential(
+            nn.Conv2d(input_dims[0], dim, 3, stride=1, padding=1),
+        )
+        for _ in range(blocks):
+            self.layers.append(CNBlock(dim))
+
+    def forward(self, x):
+        x = self.layers(x)
+        return x
+
+class Policy(nn.Module):
+    def __init__(self, input_dims, dim, action_dim):
+        super().__init__()
+        self.pwconv = nn.Linear(dim, dim)
+        self.norm = nn.LayerNorm(dim)
+        self.act = nn.GELU()
+        self.flat = nn.Flatten()
+        self.fc = nn.Linear(dim * input_dims[1] * input_dims[2], action_dim)
+    
+    def forward(self, x):
+        x = torch.permute(x, (0, 2, 3, 1))
+        x = self.pwconv(x)
+        x = self.norm(x)
+        x = self.act(x)
+        x = self.flat(x)
+        x = self.fc(x)
+        x = torch.reshape(x, (-1, 8, 20, 10))
+        return x
+
+class Value(nn.Module):
+    def __init__(self, input_dims, dim):
+        super().__init__()
+        self.pwconv = nn.Linear(dim, dim)
+        self.norm = nn.LayerNorm(dim)
+        self.act = nn.GELU()
+        self.flat = nn.Flatten()
+        self.fc1 = nn.Linear(dim * input_dims[1] * input_dims[2], dim)
+        self.fc2 = nn.Linear(dim, 1)
+    
+    def forward(self, x):
+        x = torch.permute(x, (0, 2, 3, 1))
+        x = self.pwconv(x)
+        x = self.norm(x)
+        x = self.act(x)
+        x = self.flat(x)
+        x = self.fc1(x)
+        x = self.act(x)
+        x = self.fc2(x)
+        return x
 
 class NNet(nn.Module):
-    def __init__(self):
-        # game params
-        self.action_size = 8 * 10 * 6
+    def __init__(self, input_dims = (2, 20, 10), dim=16, blocks=5, action_dim=8*20*10):
+        super().__init__()
+        self.embed = nn.Linear(49, 20 * 10)
+        self.rep = Representation(input_dims, dim, blocks)
+        self.p = Policy(input_dims, dim, action_dim)
+        self.v = Value(input_dims, dim)
+    
+    def forward(self, obs):
+        b, q = obs
+        board, queue = torch.FloatTensor(b).cuda(), torch.FloatTensor(q).cuda()
 
-        super(NNet, self).__init__()
-        self.conv1 = nn.Conv2d(1, NUM_CHANNELS, 3, stride=1, padding=1)
-        self.conv2 = nn.Conv2d(NUM_CHANNELS, NUM_CHANNELS, 3, stride=1, padding=1)
-        self.conv3 = nn.Conv2d(NUM_CHANNELS, NUM_CHANNELS, 3, stride=1, padding=1)
+        queue = torch.reshape(queue, (-1, 49))
 
-        self.tfc_1 = nn.Linear(109, 128)
+        queue_embedding = self.embed(queue)
+        x = torch.stack([board, torch.reshape(queue_embedding, (-1, 20, 10))], dim=1)
 
-        self.tfc_2 = nn.Linear(128, 128)
+        x = self.rep(x)
+        p = self.p(x)
+        v = self.v(x)
 
-        self.fc1 = nn.Linear(2048, 2048)
-        self.fc2 = nn.Linear(2048, 2048)
-
-        self.fc3 = nn.Linear(4096, 2048)
-        self.fc4 = nn.Linear(2048, self.action_size)
-        self.fc5 = nn.Linear(2048, 1)
-
-    @autocast("cuda")
-    def forward(self, b1, b2, q1, q2, c1, c2):
-        s1 = b1.view(-1, 1, 10, 6)
-        t1 = torch.cat((q1.view(-1, 49), c1.view(-1, 60)), 1)
-
-        s1 = F.relu(self.conv1(s1))
-        s1 = F.relu(self.conv2(s1))
-        s1 = F.relu(self.conv3(s1))
-
-        t1 = F.relu(self.tfc_1(t1))
-        t1 = F.relu(self.tfc_2(t1))
-
-        s1 = s1.view(-1, 1920)
-        s1 = torch.cat((s1, t1), 1)
-        s1 = F.relu(self.fc1(s1))
-
-        s2 = b2.view(-1, 1, 10, 6)
-        s2 = F.relu(self.conv1(s2))
-        s2 = s2.view(-1, 1920)
-        t2 = torch.cat((q2.view(-1, 49), c2.view(-1, 60)), 1)
-        t2 = F.relu(self.tfc_1(t2))
-        s2 = torch.cat((s2, t2), 1)
-        s2 = F.relu(self.fc2(s2))
-
-        s = torch.cat((s1, s2), 1)
-
-        s = F.relu(self.fc3(s))
-
-        pi = self.fc4(s)                                                                         # batch_size x action_size
-        v = self.fc5(s)                                                                          # batch_size x 1
-
-        return pi, v
-
-    def predict(self, obs):
-        """
-        board: np array with board
-        """
-        # timing
-
-        # preparing input
-        obs = (torch.FloatTensor(i).contiguous().cuda().unsqueeze(0) for i in obs)
-        b1, b2, q1, q2, c1, c2 = obs
-
-        pi, v = self.forward(b1, b2, q1, q2, c1, c2)
-
-        pi = pi.view(8, 10, 6)
-
-        pi, v = torch.exp(pi).data.cpu().numpy(), v.data.cpu().numpy()[0][0]
-
-        return pi, v
+        return p, v

@@ -1,57 +1,63 @@
+import sys
+import cProfile
+
 import numpy as np
-import numpy.ma as ma
-from tetris.tetris_game import Game, MIN_DELAY, MAX_DELAY
 import torch
-import random
+
+from tetris.tetris_game import State
+from tetris.nnet import NNet
 
 c_visit = 50
 c_scale = 1
-discount = 0.97
-epsilon = 0.1
+discount = 0.99
+epsilon = 0.0001
+
+np.set_printoptions(threshold=sys.maxsize)
 
 # i can't believe numpy doesn't have softmax
 def softmax(x):
-    r=np.exp(x - np.max(x))
+    r = np.exp(x - np.max(x))
     return r/r.sum()
 
-def top_k(A, k, mask):
+def top_k(A, k, moves):
     """
-    get top k elements of A
+    get top k valid moves
     """
-    A = ma.array(A, mask=mask)
-    return [tuple(np.unravel_index(i, A.shape)) for i in A.flatten().argsort(endwith=False)[-k:]]
+    out = []
+
+    indices = np.argsort(A, axis=None)
+    for i in indices:
+        if k == 0:
+            break
+        ind = np.unravel_index(i, A.shape)
+        if moves[ind] == 1:
+            out.append(ind)
+            k -= 1
+
+    return out
 
 class MCTS():
-    def __init__(self, state, player, nnet):
+    def __init__(self, state, nnet):
         self.state = state
-        self.player = player
         self.nnet = nnet
 
-        self.is_env = self.player == 2
+        self.moves = state.moves
+        self.obs = state.obs()
+        board, queue = np.expand_dims(self.obs[0], 0), np.expand_dims(self.obs[1], 0)
 
-        if self.is_env:
-            next_state, self.r = Game.transition(self.state, self.player, 0, 0)
-            self.child = MCTS(next_state, 0, self.nnet)
-            self.v = self.child.v
-            self.delay = 0
-        else:
-            self.moves = Game.moves(self.state, self.player)
-            self.obs = Game.observation(state, player)
-
-            self.logits, self.v, self.delay = self.nnet.predict(self.obs)
-            if random.random() < epsilon:
-                delay = random.random() * (MAX_DELAY - MIN_DELAY) + MIN_DELAY
-            self.g = np.random.gumbel(size=self.moves.shape)
-            self.N = np.zeros_like(self.moves)
-            self.r = np.zeros_like(self.moves)
-            self.q_hat = np.zeros_like(self.moves, dtype=float)
-            self.child = {}
+        logits, v = self.nnet((board, queue))
+        self.logits, self.v = logits.cpu().detach().numpy()[0], v.item()
+        self.g = np.random.gumbel(size=self.moves.shape)
+        self.N = np.zeros_like(self.moves)
+        self.r = np.zeros_like(self.moves, dtype=float)
+        self.q_hat = np.zeros_like(self.moves, dtype=float)
+        self.child = {}
     
     def _get_improved_estimates(self):
         """
         compute the improved policy and estimated q-value of current network using current policy, N, and q_hat
         """
-        masked_pi = softmax(self.logits) * (self.N != 0)
+        masked_pi = softmax(self.logits * (self.N != 0))
 
         visits = np.sum(self.N)
         if visits == 0:
@@ -62,24 +68,26 @@ class MCTS():
         completed_q = self.q_hat + (self.N == 0) * v_mix
         new_pi = softmax(self.logits + completed_q * (c_visit + np.max(self.N)))
 
+        # mask out invalid moves
+        new_pi = new_pi * self.moves
+        new_pi /= np.sum(new_pi)
+
         return new_pi, v_mix
 
-    def select_action(self, n, m):
+    def select_action(self, n):
         """
         select action for current state using sequential halving + gumbel exploration
         """
         budget = n
-        rounds = int(np.log2(m + 0.01))
+        m = self.moves.sum()
+        rounds = int(np.log2(m + epsilon))
 
         g = np.random.gumbel(size=self.logits.shape)
-        A = top_k(g + self.logits, m, (1 - self.moves))
+        A = top_k(self.logits + g, m, self.moves)
 
         while len(A) > 1:
             # divide budget evenly over rounds
             N_a = (n // rounds) // len(A)
-            # assign to final round if remainder
-            if len(A) == 2:
-                N_a += budget // 2
 
             for _ in range(N_a):
                 for action in A:
@@ -89,27 +97,22 @@ class MCTS():
             # equation (11)
             score = g + self.logits + self.q_hat * (c_visit + np.max(self.N))
             # discard lower half of scores
-            discard = [i[1] for i in sorted([(score[a], a) for a in A])[:len(A)//2]]
-            for i in discard:
-                A.remove(i)
+            A = sorted(A, key=lambda a: -score[a])[:len(A)//2]
 
         pi_new, v_new = self._get_improved_estimates()
- 
-        return self.obs, pi_new, v_new, A[0], self.delay
+
+        return self.obs, pi_new, v_new, A[0]
 
     def visit(self):
         """
         non-root exploration policy
         """
-        if self.is_env:
-            return (discount * self.child.visit() + self.r)
-
-        if Game.terminal(self.state):
+        if State.terminal(self.state):
             return 0
 
         new_pi, _ = self._get_improved_estimates()
 
-        score = ma.array(new_pi - self.N / (self.N.sum() + 1), mask=(1 - self.moves))
+        score = new_pi - self.N / (self.N.sum() + 1)
         action = np.unravel_index(np.argmax(score), score.shape)
         return self.visit_action(action)
 
@@ -117,24 +120,21 @@ class MCTS():
         """
         visit a new action and update N and q_hat, creating a leaf node if necessary
         """
-        assert self.player != 2
-
-        if self.moves[action] == 0:
-            self.N[action] += 1
-            self.q_hat[action] = -1
-            return -1
-
-        # discount is applied every environment move, so not necessary here
         if action in self.child:
-            # zero sum game
-            q = -self.child[action].visit()
+            v_next = self.child[action].visit()
         else:
-            next_state, r = Game.transition(self.state, self.player, action, self.delay)
+            next_state, r = State.transition(self.state, action)
             self.r[action] = r
-            self.child[action] = MCTS(next_state, (self.player + 1) % 3, self.nnet)
-            q = -self.child[action].v
+            self.child[action] = MCTS(next_state, self.nnet)
+            v_next = self.child[action].v
+        
+        q = self.r[action] + v_next * discount
 
         q_sum = self.q_hat[action] * self.N[action] + q
         self.N[action] += 1
         self.q_hat[action] = q_sum / self.N[action]
         return q
+
+nnet = NNet().cuda()
+state = State.new()
+cProfile.run('MCTS(state, nnet).select_action(500)')

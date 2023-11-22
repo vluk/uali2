@@ -1,73 +1,81 @@
-import torch
-import numpy as np
 import ray
 
-from tetris.tetris_game import Game, MIN_DELAY, MAX_DELAY
+from tetris.tetris_game import State
+from tetris.nnet import NNet
 from mcts import MCTS
-from tetris.timing_nnet import TimingNNet
+
+discount = 0.99
+
+class Game():
+    def __init__(self, td_steps=5):
+        self.td_steps = td_steps
+
+        self.steps = 0
+        self.observations = []
+        self.policies = []
+        self.values = []
+        self.rewards = []
+        self.value_targets = []
+    
+    def add(self, obs, pi, v, r):
+        self.steps += 1
+        self.observations.append(obs)
+        self.policies.append(pi)
+        self.values.append(v)
+        self.rewards.append(r)
+    
+    def compute_value_targets(self):
+        values = self.values + [0] * self.td_steps
+
+        for step in range(self.steps):
+            bootstrap = step + self.td_steps
+            if bootstrap < self.steps:
+                value = values[bootstrap] * discount**self.td_steps
+            else:
+                value = 0
+            
+            for i, reward in enumerate(self.rewards[step+1:bootstrap]):
+                value += reward * discount**i
+            self.value_targets.append(value)
+
+    def save(self, replay_buffer):
+        self.compute_value_targets()
+
+        ep_reward = 0
+        t = 1
+        
+        for step in range(self.steps):
+            target = (
+                self.observations[step],
+                self.policies[step],
+                self.value_targets[step],
+                self.rewards[step]
+            )
+            ep_reward += self.rewards[step] * t
+            t *= discount
+            replay_buffer.save_target.remote(target)
+
+        print(f"Episode reward:{ep_reward}")
 
 @ray.remote(num_gpus=0.1)
 class SelfPlay():
-    def __init__(self):
+    def __init__(self, initial_state_dict):
         self.steps = 0
         self.reward = 0
         self.i = 0
+        self.nnet = NNet().cuda()
+        self.nnet.load_state_dict(initial_state_dict)
 
-    def run_game(self, replay_buffer, n=200, m=8):
-        state = Game.new_game()
-        steps = 0
-        reward_encountered = 0
+    def run_game(self, replay_buffer, n=500):
+        state = State.new()
+        game = Game()
 
-        while not Game.terminal(state):
-            # both players make moves simultaneously based on observation
-            obs, pi, v, A0, d0  = MCTS(Game.view(state, 0), 0, self.nnet).select_action(n, m)
-            if state[0]["state"].moves[A0] == 0:
-                print("invalid action selected, skipping")
-                break
-            replay_buffer.save_experience.remote((obs, pi, v))
-
-            obs, pi, v, A1, d1 = MCTS(Game.view(state, 1), 0, self.nnet).select_action(n, m)
-            if state[1]["state"].moves[A1] == 0:
-                print("invalid action selected, skipping")
-                break
-            replay_buffer.save_experience.remote((obs, pi, v))
-
-            state, _ = Game.transition(state, 0, A0, d0)
-            state, _ = Game.transition(state, 1, A1, d1)
-
-            state, r = Game.transition(state, 2, 0, 0)
-
-            reward_encountered += abs(r)
-            steps += 1
-
-        return steps, reward_encountered
-
-    def evaluate(self):
-        nnet = TimingNNet()
-        for i in range(50):
-            for j in range(2):
-                state = Game.new_game()
-                nnet.load_state_dict(torch.load(f"checkpoints2/{i*2000:09}_checkpoint.pth"))
-                nnet.cuda()
-                nnet.eval()
-                while not Game.terminal(state):
-                    _, _, _, A0, d0 = MCTS(Game.view(state, 0), 0, nnet).select_action(100, 8)
-                    _, _, _, A1, _ = MCTS(Game.view(state, 1), 0, nnet).select_action(100, 8)
-                    if state[0]["state"].moves[A0] == 0:
-                        print(i, 1)
-                        break
-                    if state[1]["state"].moves[A1] == 0:
-                        print(i, 0)
-                        break
-                    state, _ = Game.transition(state, 0, A0, d0)
-                    state, _ = Game.transition(state, 1, A1, MIN_DELAY - state[1]["state"].t + i / 100)
-
-                    state, r = Game.transition(state, 2, 0, 0)
-                    if (state[0]["state"].terminal()):
-                        print(i, 1)
-                    if (state[1]["state"].terminal()):
-                        print(i, 0)
-
+        while not state.terminal():
+            obs, pi, v, a = MCTS(state, self.nnet).select_action(n)
+            state, r = state.transition(a)
+            game.add(obs, pi, v, r)
+        
+        game.save(replay_buffer)
 
     def get_latest_game(self):
         return self.steps, self.reward, self.i
@@ -75,10 +83,7 @@ class SelfPlay():
     def selfplay(self, replay_buffer):
         i = 0
         while True:
-            steps, reward = self.run_game(replay_buffer)
-            print(f"Game {i}: {steps} steps, {reward} total reward")
-
-            self.steps, self.reward, self.i = steps, reward, i
+            self.run_game(replay_buffer)
 
             self.nnet.load_state_dict(ray.get(replay_buffer.get_state_dict.remote()))
             self.nnet.eval()
